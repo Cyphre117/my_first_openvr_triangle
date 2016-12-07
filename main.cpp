@@ -9,19 +9,24 @@
 #include <cstdio>
 #include <string>
 
-// DISCLAIMER: _DO NOT_ put the headset on! this app renders an identical 2D triangle in each eye
-// and will give you a very sore head very quickly!
-//
 // This is a tech test of loading up all the OpenVR things and putting something on the HMD
-// Tested on Windows 10 with Visual Studio 2013 community, an Oculus DK2, Oculus Home, and Steam VR
+// Tested on Windows 10 with Visual Studio 2013 community and an Oculus DK2.
+// Requires Oculus Home and Steam VR be installed
+// Depends on SDL2, GLEW, GLM, and OpenVR
 // 
 // Oculus Home will try to convince you the DK2 is old and unsupported but it still works as of 2016-12-06
+//
+// This is based on the code from the hellovr_opengl sample included with OpenVR
 
-// Globals
+/* Global variables */
+
+// SDL2
 SDL_Window* companion_window = nullptr;
-const int companion_width = 640;
-const int companion_height = 320;
+const int companion_width = 1280;
+const int companion_height = 640;
 SDL_GLContext gl_context = 0;
+
+// OpenGL 
 GLuint scene_shader_program = 0;
 GLuint scene_vao = 0;	// Vertex attribute object, stores the vertex layout
 GLuint scene_vbo = 0;	// Vertex buffer object, stores the vertex data
@@ -30,19 +35,6 @@ GLuint window_shader_program = 0;
 GLuint window_vao = 0;	// Vertex attribute object
 GLuint window_vbo = 0;	// Vertex buffer object
 GLuint window_ebo = 0;	// element buffer object, the order for vertices to be drawn
-
-vr::IVRSystem* hmd = nullptr;
-const float near_plane = 0.1f;
-const float far_plane = 20.0f;
-uint32_t hmd_render_target_width;
-uint32_t hmd_render_target_height;
-
-vr::TrackedDevicePose_t m_rTrackedDevicePose[vr::k_unMaxTrackedDeviceCount];
-glm::mat4 m_rmat4DevicePose[vr::k_unMaxTrackedDeviceCount];
-std::string m_strPoseClasses;							// what classes we saw poses for this frame
-char m_rDevClassChar[vr::k_unMaxTrackedDeviceCount];	// for each device, a character representing its class
-int m_iValidPoseCount;
-glm::mat4 m_mat4HMDPose;
 
 struct FrameBufferDesc
 {
@@ -53,7 +45,23 @@ struct FrameBufferDesc
 	GLuint resolve_frame_buffer;
 } left_eye_desc, right_eye_desc;
 
+// OpenvR
+vr::IVRSystem* hmd = nullptr;
+const float near_plane = 0.1f;
+const float far_plane = 20.0f;
+uint32_t hmd_render_target_width;
+uint32_t hmd_render_target_height;
 
+vr::TrackedDevicePose_t tracked_device_pose[vr::k_unMaxTrackedDeviceCount];
+glm::mat4 mat4_device_pose[vr::k_unMaxTrackedDeviceCount];
+std::string pose_classes_string;							// what classes we saw poses for this frame
+char dev_class_char[vr::k_unMaxTrackedDeviceCount];	// for each device, a character representing its class
+int valid_pose_count;
+glm::mat4 hmd_pose_matrix;
+
+/* Functions */
+
+// Usefull for getting information about the current hardware setup
 std::string GetTrackedDeviceString( vr::IVRSystem *pHmd, vr::TrackedDeviceIndex_t unDevice, vr::TrackedDeviceProperty prop, vr::TrackedPropertyError *peError = NULL )
 {
 	uint32_t unRequiredBufferLen = pHmd->GetStringTrackedDeviceProperty( unDevice, prop, NULL, 0, peError );
@@ -67,7 +75,8 @@ std::string GetTrackedDeviceString( vr::IVRSystem *pHmd, vr::TrackedDeviceIndex_
 	return sResult;
 }
 
-// Create a frame buffer
+// Create a frame buffer for use with the HMD
+// Fills in the Frame Buffer Description 
 bool CreateFrameBuffer( int width, int height, FrameBufferDesc& desc )
 {
 	// render buffer
@@ -110,7 +119,8 @@ bool CreateFrameBuffer( int width, int height, FrameBufferDesc& desc )
 	return true;
 }
 
-// Compile a shader program
+// Compile a shader program from two strings
+// name is provided for prettier error messages
 GLuint CreateShaderProgram( const char* name, const char* vertex_source, const char* fragment_source )
 {
 	GLuint shader_program = glCreateProgram();
@@ -223,7 +233,7 @@ void RenderScene( vr::Hmd_Eye eye )
 	view_proj_matrix = GetHMDMartixProjection( eye )
 		//* glm::lookAt( glm::vec3( 2, 2, 2 ), glm::vec3( 0, 0, 0 ), glm::vec3( 0, 0, 1 ) )
 		* GetHMDMatrixPoseEye( eye )
-		* m_mat4HMDPose;
+		* hmd_pose_matrix;
 
 	glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
 
@@ -240,36 +250,36 @@ void UpdateHMDMatrixPose()
 	if( !hmd )
 		return;
 
-	vr::VRCompositor()->WaitGetPoses( m_rTrackedDevicePose, vr::k_unMaxTrackedDeviceCount, NULL, 0 );
+	vr::VRCompositor()->WaitGetPoses( tracked_device_pose, vr::k_unMaxTrackedDeviceCount, NULL, 0 );
 
-	m_iValidPoseCount = 0;
-	m_strPoseClasses = "";
+	valid_pose_count = 0;
+	pose_classes_string = "";
 	for( int nDevice = 0; nDevice < vr::k_unMaxTrackedDeviceCount; ++nDevice )
 	{
-		if( m_rTrackedDevicePose[nDevice].bPoseIsValid )
+		if( tracked_device_pose[nDevice].bPoseIsValid )
 		{
-			m_iValidPoseCount++;
-			m_rmat4DevicePose[nDevice] = ConvertHMDMat3ToGLMMat4( m_rTrackedDevicePose[nDevice].mDeviceToAbsoluteTracking );
-			if( m_rDevClassChar[nDevice] == 0 )
+			valid_pose_count++;
+			mat4_device_pose[nDevice] = ConvertHMDMat3ToGLMMat4( tracked_device_pose[nDevice].mDeviceToAbsoluteTracking );
+			if( dev_class_char[nDevice] == 0 )
 			{
 				switch( hmd->GetTrackedDeviceClass( nDevice ) )
 				{
-				case vr::TrackedDeviceClass_Controller:        m_rDevClassChar[nDevice] = 'C'; break;
-				case vr::TrackedDeviceClass_HMD:               m_rDevClassChar[nDevice] = 'H'; break;
-				case vr::TrackedDeviceClass_Invalid:           m_rDevClassChar[nDevice] = 'I'; break;
-				case vr::TrackedDeviceClass_Other:             m_rDevClassChar[nDevice] = 'O'; break;
-				case vr::TrackedDeviceClass_TrackingReference: m_rDevClassChar[nDevice] = 'T'; break;
-				default:                                       m_rDevClassChar[nDevice] = '?'; break;
+				case vr::TrackedDeviceClass_Controller:        dev_class_char[nDevice] = 'C'; break;
+				case vr::TrackedDeviceClass_HMD:               dev_class_char[nDevice] = 'H'; break;
+				case vr::TrackedDeviceClass_Invalid:           dev_class_char[nDevice] = 'I'; break;
+				case vr::TrackedDeviceClass_Other:             dev_class_char[nDevice] = 'O'; break;
+				case vr::TrackedDeviceClass_TrackingReference: dev_class_char[nDevice] = 'T'; break;
+				default:                                       dev_class_char[nDevice] = '?'; break;
 				}
 			}
-			m_strPoseClasses += m_rDevClassChar[nDevice];
+			pose_classes_string += dev_class_char[nDevice];
 		}
 	}
 
-	if( m_rTrackedDevicePose[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid )
+	if( tracked_device_pose[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid )
 	{
-		m_mat4HMDPose = m_rmat4DevicePose[vr::k_unTrackedDeviceIndex_Hmd];
-		m_mat4HMDPose = glm::inverse( m_mat4HMDPose );
+		hmd_pose_matrix = mat4_device_pose[vr::k_unTrackedDeviceIndex_Hmd];
+		hmd_pose_matrix = glm::inverse( hmd_pose_matrix );
 	}
 }
 
@@ -504,10 +514,6 @@ int main(int argc, char* argv[])
 			else if( sdl_event.type == SDL_KEYDOWN )
 			{
 				if( sdl_event.key.keysym.scancode == SDL_SCANCODE_ESCAPE ) done = true;
-				else
-				{
-					printf( "Position: %f %f %f\n", glm::vec3( m_mat4HMDPose[3] ).x, glm::vec3( m_mat4HMDPose[3] ).y, glm::vec3( m_mat4HMDPose[3] ).z );
-				}
 			}
 		}
 
@@ -519,13 +525,13 @@ int main(int argc, char* argv[])
 
 		// HEY YOU - IMPORTANT!
 		//
-		// This must be called or the app will not gain focus!
-		// TBH at this stage I don't actually know what poses are,
+		// This must be called or the app will not gain focus! Currently called inside UpdateHMDMatrixPose();
+		//		vr::TrackedDevicePose_t pose_buffer[vr::k_unMaxTrackedDeviceCount];
+		//		vr::VRCompositor()->WaitGetPoses( pose_buffer, vr::k_unMaxTrackedDeviceCount, NULL, 0 );
+		//
+		// TBH at this stage I don't fully know what poses are,
 		// apart from the fact valve seem to think they are important and we must get them
-		{
-			//vr::TrackedDevicePose_t pose_buffer[vr::k_unMaxTrackedDeviceCount];
-			//vr::VRCompositor()->WaitGetPoses( pose_buffer, vr::k_unMaxTrackedDeviceCount, NULL, 0 );
-		}
+		// Something to do with the position of the HMD
 		UpdateHMDMatrixPose();
 
 		glEnable( GL_DEPTH_TEST );
