@@ -1,6 +1,7 @@
 #include <SDL.h>
 #include <GL/glew.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <SDL_opengl.h>
 #include <openvr.h>
@@ -35,6 +36,13 @@ const float near_plane = 0.1f;
 const float far_plane = 20.0f;
 uint32_t hmd_render_target_width;
 uint32_t hmd_render_target_height;
+
+vr::TrackedDevicePose_t m_rTrackedDevicePose[vr::k_unMaxTrackedDeviceCount];
+glm::mat4 m_rmat4DevicePose[vr::k_unMaxTrackedDeviceCount];
+std::string m_strPoseClasses;							// what classes we saw poses for this frame
+char m_rDevClassChar[vr::k_unMaxTrackedDeviceCount];	// for each device, a character representing its class
+int m_iValidPoseCount;
+glm::mat4 m_mat4HMDPose;
 
 struct FrameBufferDesc
 {
@@ -166,7 +174,7 @@ GLuint CreateShaderProgram( const char* name, const char* vertex_source, const c
 	return shader_program;
 }
 
-glm::mat4 ConvertHMDMa4ToGLM( vr::HmdMatrix44_t mat )
+glm::mat4 ConvertHMDMat4ToGLMMat4( const vr::HmdMatrix44_t& mat )
 {
 	return glm::mat4(
 		mat.m[0][0], mat.m[1][0], mat.m[2][0], mat.m[3][0],
@@ -175,6 +183,17 @@ glm::mat4 ConvertHMDMa4ToGLM( vr::HmdMatrix44_t mat )
 		mat.m[0][3], mat.m[1][3], mat.m[2][3], mat.m[3][3]
 		);
 }
+
+glm::mat4 ConvertHMDMat3ToGLMMat4( const vr::HmdMatrix34_t& mat )
+{
+	return glm::mat4(
+		mat.m[0][0], mat.m[1][0], mat.m[2][0], 0.0,
+		mat.m[0][1], mat.m[1][1], mat.m[2][1], 0.0,
+		mat.m[0][2], mat.m[1][2], mat.m[2][2], 0.0,
+		mat.m[0][3], mat.m[1][3], mat.m[2][3], 1.0f
+		);
+}
+
 glm::mat4 GetHMDMartixProjection( vr::Hmd_Eye eye )
 {
 	if( !hmd )
@@ -182,33 +201,76 @@ glm::mat4 GetHMDMartixProjection( vr::Hmd_Eye eye )
 
 	vr::HmdMatrix44_t matrix = hmd->GetProjectionMatrix( eye, near_plane, far_plane, vr::API_OpenGL );
 
-	return ConvertHMDMa4ToGLM( matrix );
+	return ConvertHMDMat4ToGLMMat4( matrix );
 }
 
-glm::mat4 GetHMDMatrixPose( vr::Hmd_Eye eye )
+glm::mat4 GetHMDMatrixPoseEye( vr::Hmd_Eye eye )
 {
 	if( !hmd )
 		return glm::mat4();
 
 	vr::HmdMatrix34_t matrix = hmd->GetEyeToHeadTransform( eye );
 
-	return glm::mat4(
-		matrix.m[0][0], matrix.m[1][0], matrix.m[2][0], 0.0,
-		matrix.m[0][1], matrix.m[1][1], matrix.m[2][1], 0.0,
-		matrix.m[0][2], matrix.m[1][2], matrix.m[2][2], 0.0,
-		matrix.m[0][3], matrix.m[1][3], matrix.m[2][3], 0.0
-		);
+	return ConvertHMDMat3ToGLMMat4( matrix );
 }
 
-void RenderScene()
+void RenderScene( vr::Hmd_Eye eye )
 {
+	glm::mat4 view_proj_matrix = glm::mat4( 1.0 );
+
+	//view_proj_matrix = glm::perspective( glm::radians( 45.0f ), companion_width / (float)companion_height, near_plane, far_plane )
+	//	* glm::lookAt( glm::vec3( 2, 2, 2 ), glm::vec3( 0, 0, 0 ), glm::vec3( 0, 0, 1 ) );
+	view_proj_matrix = GetHMDMartixProjection( eye )
+		//* glm::lookAt( glm::vec3( 2, 2, 2 ), glm::vec3( 0, 0, 0 ), glm::vec3( 0, 0, 1 ) )
+		* GetHMDMatrixPoseEye( eye )
+		* m_mat4HMDPose;
+
 	glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
 
 	glUseProgram( scene_shader_program );
 	glBindVertexArray( scene_vao );
 	glBindBuffer( GL_ARRAY_BUFFER, scene_vbo );
+	glUniformMatrix4fv( scene_matrix_location, 1, GL_FALSE, glm::value_ptr( view_proj_matrix ) );
 
-	glDrawArrays( GL_TRIANGLES, 0, 3 );
+	glDrawArrays( GL_TRIANGLES, 0, 12 );
+}
+
+void UpdateHMDMatrixPose()
+{
+	if( !hmd )
+		return;
+
+	vr::VRCompositor()->WaitGetPoses( m_rTrackedDevicePose, vr::k_unMaxTrackedDeviceCount, NULL, 0 );
+
+	m_iValidPoseCount = 0;
+	m_strPoseClasses = "";
+	for( int nDevice = 0; nDevice < vr::k_unMaxTrackedDeviceCount; ++nDevice )
+	{
+		if( m_rTrackedDevicePose[nDevice].bPoseIsValid )
+		{
+			m_iValidPoseCount++;
+			m_rmat4DevicePose[nDevice] = ConvertHMDMat3ToGLMMat4( m_rTrackedDevicePose[nDevice].mDeviceToAbsoluteTracking );
+			if( m_rDevClassChar[nDevice] == 0 )
+			{
+				switch( hmd->GetTrackedDeviceClass( nDevice ) )
+				{
+				case vr::TrackedDeviceClass_Controller:        m_rDevClassChar[nDevice] = 'C'; break;
+				case vr::TrackedDeviceClass_HMD:               m_rDevClassChar[nDevice] = 'H'; break;
+				case vr::TrackedDeviceClass_Invalid:           m_rDevClassChar[nDevice] = 'I'; break;
+				case vr::TrackedDeviceClass_Other:             m_rDevClassChar[nDevice] = 'O'; break;
+				case vr::TrackedDeviceClass_TrackingReference: m_rDevClassChar[nDevice] = 'T'; break;
+				default:                                       m_rDevClassChar[nDevice] = '?'; break;
+				}
+			}
+			m_strPoseClasses += m_rDevClassChar[nDevice];
+		}
+	}
+
+	if( m_rTrackedDevicePose[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid )
+	{
+		m_mat4HMDPose = m_rmat4DevicePose[vr::k_unTrackedDeviceIndex_Hmd];
+		m_mat4HMDPose = glm::inverse( m_mat4HMDPose );
+	}
 }
 
 int main(int argc, char* argv[])
@@ -301,7 +363,7 @@ int main(int argc, char* argv[])
 			"in vec3 vPosition;"
 			"void main()"
 			"{"
-			"	gl_Position = matrix vec4(vPosition, 1.0);"
+			"	gl_Position = matrix * vec4(vPosition, 1.0);"
 			"}";
 		const char* scene_fragment_source =
 			"#version 410\n"
@@ -311,7 +373,7 @@ int main(int argc, char* argv[])
 			"	outColour = vec4(1.0, 1.0, 1.0, 1.0);"
 			"}";
 		scene_shader_program = CreateShaderProgram( "scene", scene_vertex_source, scene_fragment_source );
-		scene_matrix_location = glGetUniformLocation( scene_shader_program, "martix" );
+		scene_matrix_location = glGetUniformLocation( scene_shader_program, "matrix" );
 
 		const char* window_vertex_source =
 			"#version 410\n"
@@ -379,11 +441,23 @@ int main(int argc, char* argv[])
 
 	// Setup scene data
 	{
-		// Crappy Triangle
+		// Some hardcoded Triangles
 		float vertices[] = {
-			0.0f, 0.5f, 0.0f, // Vertex 1 (X, Y)
-			0.5f, -0.5f, 0.0f, // Vertex 2 (X, Y)
-			-0.5f, -0.5f, 0.0f  // Vertex 3 (X, Y)
+			0.0f, 0.5f, 2.0f,
+			0.5f, -0.5f, 2.0f,
+			-0.5f, -0.5f, 2.0f,
+
+			0.0f, 0.5f, -2.0f,
+			0.5f, -0.5f, -2.0f,
+			-0.5f, -0.5f, -2.0f,
+
+			2, 0, 0,
+			2, 1, 0,
+			2, 1, 1,
+
+			-2, 0, 0,
+			-2, 1, 0,
+			-2, 1, 1
 		};
 
 		// Create a crappy triangle for rendering
@@ -415,9 +489,7 @@ int main(int argc, char* argv[])
 		SDL_ShowSimpleMessageBox( SDL_MESSAGEBOX_ERROR, "VR_Init Failed", "Could not initialise compositor", NULL );
 		return 1;
 	}
-
-	//vr::VRCompositor()->WaitGetPoses();
-
+	
 	// Finally!
 	// The application loop
 	bool done = false;
@@ -432,6 +504,10 @@ int main(int argc, char* argv[])
 			else if( sdl_event.type == SDL_KEYDOWN )
 			{
 				if( sdl_event.key.keysym.scancode == SDL_SCANCODE_ESCAPE ) done = true;
+				else
+				{
+					printf( "Position: %f %f %f\n", glm::vec3( m_mat4HMDPose[3] ).x, glm::vec3( m_mat4HMDPose[3] ).y, glm::vec3( m_mat4HMDPose[3] ).z );
+				}
 			}
 		}
 
@@ -447,23 +523,20 @@ int main(int argc, char* argv[])
 		// TBH at this stage I don't actually know what poses are,
 		// apart from the fact valve seem to think they are important and we must get them
 		{
-			vr::TrackedDevicePose_t pose_buffer[vr::k_unMaxTrackedDeviceCount];
-			vr::VRCompositor()->WaitGetPoses( pose_buffer, vr::k_unMaxTrackedDeviceCount, NULL, 0 );
+			//vr::TrackedDevicePose_t pose_buffer[vr::k_unMaxTrackedDeviceCount];
+			//vr::VRCompositor()->WaitGetPoses( pose_buffer, vr::k_unMaxTrackedDeviceCount, NULL, 0 );
 		}
-
-		glm::mat4 view_proj_matrix = glm::mat4();
+		UpdateHMDMatrixPose();
 
 		glEnable( GL_DEPTH_TEST );
 		glClearColor( 0.0, 0.0, 0.0, 1.0 );
 
-		// left eye
+		// render left eye
 		glEnable( GL_MULTISAMPLE );
 		glBindFramebuffer( GL_FRAMEBUFFER, left_eye_desc.render_frame_buffer );
 		glViewport( 0, 0, hmd_render_target_width, hmd_render_target_height );
-		view_proj_matrix = GetHMDMartixProjection( vr::Eye_Left ) * GetHMDMatrixPose( vr::Eye_Left );
-		glUniformMatrix4fv( scene_matrix_location, 1, GL_FALSE, glm::value_ptr(view_proj_matrix) );
 
-		RenderScene();
+		RenderScene( vr::Eye_Left );
 
 		glBindFramebuffer( GL_FRAMEBUFFER, 0 );
 		glDisable( GL_MULTISAMPLE );
@@ -477,14 +550,12 @@ int main(int argc, char* argv[])
 		glBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
 		glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
 
-		// Right eye
+		// render Right eye
 		glEnable( GL_MULTISAMPLE );
 		glBindFramebuffer( GL_FRAMEBUFFER, right_eye_desc.render_frame_buffer );
 		glViewport( 0, 0, hmd_render_target_width, hmd_render_target_height );
-		view_proj_matrix = GetHMDMartixProjection( vr::Eye_Right ) * GetHMDMatrixPose( vr::Eye_Right );
-		glUniformMatrix4fv( scene_matrix_location, 1, GL_FALSE, glm::value_ptr( view_proj_matrix ) );
 
-		RenderScene();
+		RenderScene( vr::Eye_Right );
 
 		glBindFramebuffer( GL_FRAMEBUFFER, 0 );
 		glDisable( GL_MULTISAMPLE );
@@ -498,6 +569,7 @@ int main(int argc, char* argv[])
 		glBindFramebuffer( GL_READ_FRAMEBUFFER, 0 );
 		glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
 
+		// Submit frames to HMD
 		if( !hmd->IsInputFocusCapturedByAnotherProcess() )
 		{
 			vr::EVRCompositorError submit_error = vr::VRCompositorError_None;
@@ -522,8 +594,7 @@ int main(int argc, char* argv[])
 			printf( "Another process has focus of the HMD!\n" );
 		}
 
-		// Render the companion window
-
+		// Draw the companion window
 		glDisable( GL_DEPTH_TEST );
 		glBindFramebuffer( GL_FRAMEBUFFER, 0 );
 		glViewport( 0, 0, companion_width, companion_height );
