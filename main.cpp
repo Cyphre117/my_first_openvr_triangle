@@ -51,11 +51,15 @@ const float near_plane = 0.1f;
 const float far_plane = 20.0f;
 uint32_t hmd_render_target_width;
 uint32_t hmd_render_target_height;
+glm::mat4 left_eye_projection = glm::mat4( 1.0f );
+glm::mat4 left_eye_to_pose = glm::mat4( 1.0f );
+glm::mat4 right_eye_projection = glm::mat4( 1.0f );
+glm::mat4 right_eye_to_pose = glm::mat4( 1.0f );
 
 vr::TrackedDevicePose_t tracked_device_pose[vr::k_unMaxTrackedDeviceCount];
 glm::mat4 mat4_device_pose[vr::k_unMaxTrackedDeviceCount];
 std::string pose_classes_string;							// what classes we saw poses for this frame
-char dev_class_char[vr::k_unMaxTrackedDeviceCount];	// for each device, a character representing its class
+char dev_class_char[vr::k_unMaxTrackedDeviceCount];			// for each device, a character representing its class
 int valid_pose_count;
 glm::mat4 hmd_pose_matrix;
 
@@ -230,10 +234,27 @@ void RenderScene( vr::Hmd_Eye eye )
 
 	//view_proj_matrix = glm::perspective( glm::radians( 45.0f ), companion_width / (float)companion_height, near_plane, far_plane )
 	//	* glm::lookAt( glm::vec3( 2, 2, 2 ), glm::vec3( 0, 0, 0 ), glm::vec3( 0, 0, 1 ) );
-	view_proj_matrix = GetHMDMartixProjection( eye )
+	//view_proj_matrix = GetHMDMartixProjection( eye )
 		//* glm::lookAt( glm::vec3( 2, 2, 2 ), glm::vec3( 0, 0, 0 ), glm::vec3( 0, 0, 1 ) )
-		* GetHMDMatrixPoseEye( eye )
-		* hmd_pose_matrix;
+		//* GetHMDMatrixPoseEye( eye )
+		//* hmd_pose_matrix;
+
+	if( eye == vr::Eye_Left )
+	{
+		// Left eye
+		view_proj_matrix =
+			left_eye_projection
+			* left_eye_to_pose
+			* hmd_pose_matrix;
+	}
+	else
+	{
+		// Right Eye
+		view_proj_matrix =
+			right_eye_projection
+			* right_eye_to_pose
+			* hmd_pose_matrix;
+	}
 
 	glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
 
@@ -305,7 +326,7 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	// Load the SteamVR Runtime
+	// Load the OpenVR/SteamVR Runtime
 	vr::EVRInitError init_error = vr::VRInitError_None;
 	hmd = vr::VR_Init( &init_error, vr::VRApplication_Scene );
 	if( init_error != vr::VRInitError_None )
@@ -499,6 +520,13 @@ int main(int argc, char* argv[])
 		SDL_ShowSimpleMessageBox( SDL_MESSAGEBOX_ERROR, "VR_Init Failed", "Could not initialise compositor", NULL );
 		return 1;
 	}
+
+	// Grab the projection and eye to pos matrices
+	// These are fixed, only the pose changes each frame
+	left_eye_projection = GetHMDMartixProjection( vr::Eye_Left );
+	left_eye_to_pose = GetHMDMatrixPoseEye( vr::Eye_Left );
+	right_eye_projection = GetHMDMartixProjection( vr::Eye_Right );
+	right_eye_to_pose = GetHMDMatrixPoseEye( vr::Eye_Right );
 	
 	// Finally!
 	// The application loop
